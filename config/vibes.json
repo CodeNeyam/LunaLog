@@ -1,0 +1,14 @@
+{
+  "channels": {
+    "chat": ["general", "chat", "discussion"],
+    "game": ["gaming", "games", "pubg"],
+    "movie": ["movies", "anime", "watch-party"],
+    "music": ["music", "songs"]
+  },
+  "keywords": {
+    "chat": ["hello", "salut", "salam", "talk", "chat"],
+    "game": ["game", "gaming", "pubg", "rank", "squad"],
+    "movie": ["movie", "movies", "anime", "episode", "netflix"],
+    "music": ["music", "song", "songs", "playlist", "spotify"]
+  }
+}

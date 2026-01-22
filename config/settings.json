@@ -1,0 +1,17 @@
+{
+  "timezone": "Africa/Casablanca",
+  "tracking": {
+    "trackMessages": true,
+    "trackVoice": true,
+    "trackInteractions": true
+  },
+  "moments": {
+    "maxPerUser": 50
+  },
+  "crewBuckets": [
+    { "name": "Night Crew", "startHour": 22, "endHour": 5 },
+    { "name": "Morning Crew", "startHour": 6, "endHour": 11 },
+    { "name": "Afternoon Crew", "startHour": 12, "endHour": 17 },
+    { "name": "Evening Crew", "startHour": 18, "endHour": 21 }
+  ]
+}

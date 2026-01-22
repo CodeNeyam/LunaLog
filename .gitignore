@@ -1,0 +1,9 @@
+// file: .gitignore
+node_modules/
+dist/
+data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+.env
+.DS_Store
