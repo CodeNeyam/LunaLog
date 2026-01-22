@@ -38,9 +38,15 @@ export function createMessageTracker(deps: {
     const userId = full.author?.id;
     if (!userId) return;
 
+    const atIso = full.createdAt.toISOString();
+
     // Ensure user row exists
     const joinIso = full.member?.joinedAt ? full.member.joinedAt.toISOString() : null;
     statements.users.upsertUser(userId, joinIso);
+
+    // LAST message + LAST seen
+    statements.users.setLastMessage(userId, atIso, full.channelId);
+    statements.users.setLastSeen(userId, atIso, "message", full.channelId);
 
     // First message moment
     const hasFirstMsg = momentsService.getMomentByType(userId, "FIRST_MESSAGE");
@@ -59,7 +65,7 @@ export function createMessageTracker(deps: {
         channelName
       };
 
-      await momentsService.ensureMoment(userId, "FIRST_MESSAGE", meta, full.createdAt.toISOString());
+      await momentsService.ensureMoment(userId, "FIRST_MESSAGE", meta, atIso);
     }
 
     // Activity counters
@@ -68,8 +74,8 @@ export function createMessageTracker(deps: {
     const weekendDelta = isWeekendUTC(full.createdAt) ? 1 : 0;
     statements.activity.addMessage(userId, dateKey, bucket, weekendDelta);
 
-    // Interactions + first connection moment
-    const { firstConnectionCandidate } = await interactionTracker.recordFromMessage(full);
+    // Interactions + first connection moment + LAST connection snapshot
+    const { firstConnectionCandidate, lastConnectionCandidate } = await interactionTracker.recordFromMessage(full);
 
     if (firstConnectionCandidate) {
       const hasFirstConn = momentsService.getMomentByType(userId, "FIRST_CONNECTION");
@@ -79,8 +85,18 @@ export function createMessageTracker(deps: {
           via: firstConnectionCandidate.via,
           channelId: full.channelId
         };
-        await momentsService.ensureMoment(userId, "FIRST_CONNECTION", meta, full.createdAt.toISOString());
+        await momentsService.ensureMoment(userId, "FIRST_CONNECTION", meta, atIso);
       }
+    }
+
+    if (lastConnectionCandidate) {
+      statements.users.setLastConnection(
+        userId,
+        atIso,
+        lastConnectionCandidate.otherUserId,
+        lastConnectionCandidate.via
+      );
+      statements.users.setLastSeen(userId, atIso, "connection", full.channelId);
     }
 
     // Vibe inference (channels + keywords)

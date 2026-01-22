@@ -40,6 +40,12 @@ export function createVoiceTracker(deps: {
 
     if (totalMinutes <= 0) return;
 
+    const endIso = new Date(endAtMs).toISOString();
+
+    // LAST VC + LAST seen
+    statements.users.setLastVc(userId, endIso, channelId, totalMinutes);
+    statements.users.setLastSeen(userId, endIso, "voice", channelId);
+
     const split = splitMinutesByBucketUTC(startAt, endAt);
 
     for (const day of split.days) {
@@ -60,7 +66,7 @@ export function createVoiceTracker(deps: {
         channelName: typeof channel?.name === "string" ? channel.name : "unknown",
         minutes: totalMinutes
       };
-      await momentsService.ensureMoment(userId, "FIRST_VC", meta, new Date(endAtMs).toISOString());
+      await momentsService.ensureMoment(userId, "FIRST_VC", meta, endIso);
     }
 
     // Overlap tracking approximation:
@@ -102,6 +108,9 @@ export function createVoiceTracker(deps: {
           vcMinutesDelta: overlapMinutes,
           lastInteractionAtIso: atIso
         });
+
+        // Optional: if you want VC overlap to count as "connection" in /journey:
+        // statements.users.setLastConnection(userId, atIso, otherId, "vc");
       }
     } catch (err) {
       logger.debug("VC overlap tracking failed (ignored)", { err: err instanceof Error ? err.message : String(err) });

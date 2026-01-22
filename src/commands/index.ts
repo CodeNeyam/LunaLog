@@ -10,6 +10,12 @@ import { aboutCommand } from "./about.js";
 import { momentsCommand } from "./moments.js";
 import { setvibeCommand } from "./setvibe.js";
 
+import { seenCommand } from "./seen.js";
+import { linkCommand } from "./link.js";
+import { topCommand } from "./top.js";
+import { vibesCommand } from "./vibes.js";
+import { momentCommand } from "./moment.js";
+
 export type CommandContext = {
   interaction: ChatInputCommandInteraction;
   logger: Logger;
@@ -27,5 +33,11 @@ export type Command = {
 export const commands: Record<string, Command> = {
   about: aboutCommand,
   moments: momentsCommand,
-  setvibe: setvibeCommand
+  setvibe: setvibeCommand,
+
+  seen: seenCommand,
+  link: linkCommand,
+  top: topCommand,
+  vibes: vibesCommand,
+  moment: momentCommand
 };

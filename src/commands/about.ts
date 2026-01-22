@@ -28,15 +28,25 @@ export const aboutCommand: Command = {
     const userRow = statements.users.getUser(target.id);
     const crew = crewClassifier.classify(target.id);
 
+    // Backfill a JOINED moment for users that joined before the bot existed
+    const existingFirst = momentsService.getEarliestMoment(target.id);
+    if (!existingFirst) {
+      const iso = joinIso ?? new Date().toISOString();
+      await momentsService.ensureMoment(
+        target.id,
+        "JOINED",
+        { guildId: guild.id, backfill: true },
+        iso
+      );
+    }
+
     const firstMoment = momentsService.getEarliestMoment(target.id);
     const firstMemoryText = firstMoment ? formatMomentShort(firstMoment) : "—";
 
     const vibeText = formatVibeDisplay(userRow, config);
 
     const top = statements.interactions.topMostSeenWith(target.id, config.settings.maxMostSeenWith);
-    const mostSeenWithText = top.length
-      ? top.map((r) => `<@${r.other_user_id}>`).join(", ")
-      : "—";
+    const mostSeenWithText = top.length ? top.map((r) => `<@${r.other_user_id}>`).join(", ") : "—";
 
     const embed = buildProfileEmbed({
       title: "🌙 Bound By Will Profile",

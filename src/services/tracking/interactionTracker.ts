@@ -6,6 +6,7 @@ import type { Statements } from "../../db/statements.js";
 export type InteractionTracker = {
   recordFromMessage: (message: Message) => Promise<{
     firstConnectionCandidate: { otherUserId: string; via: "reply" | "mention" } | null;
+    lastConnectionCandidate: { otherUserId: string; via: "reply" | "mention" } | null;
   }>;
 };
 
@@ -14,9 +15,10 @@ export function createInteractionTracker(deps: { logger: Logger; statements: Sta
 
   async function recordFromMessage(message: Message): Promise<{
     firstConnectionCandidate: { otherUserId: string; via: "reply" | "mention" } | null;
+    lastConnectionCandidate: { otherUserId: string; via: "reply" | "mention" } | null;
   }> {
     const authorId = message.author?.id;
-    if (!authorId) return { firstConnectionCandidate: null };
+    if (!authorId) return { firstConnectionCandidate: null, lastConnectionCandidate: null };
 
     const atIso = message.createdAt.toISOString();
 
@@ -60,9 +62,22 @@ export function createInteractionTracker(deps: { logger: Logger; statements: Sta
       }
     }
 
-    if (replyTargetId) return { firstConnectionCandidate: { otherUserId: replyTargetId, via: "reply" } };
-    if (firstMentionId) return { firstConnectionCandidate: { otherUserId: firstMentionId, via: "mention" } };
-    return { firstConnectionCandidate: null };
+    // Prefer replies as "the connection" if present; else first mention.
+    if (replyTargetId) {
+      return {
+        firstConnectionCandidate: { otherUserId: replyTargetId, via: "reply" },
+        lastConnectionCandidate: { otherUserId: replyTargetId, via: "reply" }
+      };
+    }
+
+    if (firstMentionId) {
+      return {
+        firstConnectionCandidate: { otherUserId: firstMentionId, via: "mention" },
+        lastConnectionCandidate: { otherUserId: firstMentionId, via: "mention" }
+      };
+    }
+
+    return { firstConnectionCandidate: null, lastConnectionCandidate: null };
   }
 
   return { recordFromMessage };

@@ -8,6 +8,23 @@ CREATE TABLE IF NOT EXISTS users(
   join_date TEXT,
   chosen_vibe TEXT,
   inferred_vibe TEXT,
+
+  -- LAST / LATEST activity snapshots (for /journey)
+  last_message_at TEXT,
+  last_message_channel_id TEXT,
+
+  last_vc_at TEXT,
+  last_vc_channel_id TEXT,
+  last_vc_minutes INTEGER,
+
+  last_connection_at TEXT,
+  last_connection_user_id TEXT,
+  last_connection_via TEXT, -- 'reply' | 'mention' | 'vc'
+
+  last_seen_at TEXT,
+  last_seen_type TEXT,      -- 'message' | 'voice' | 'connection' | 'command'
+  last_seen_channel_id TEXT,
+
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );

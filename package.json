@@ -10,9 +10,11 @@
   },
   "scripts": {
     "dev": "tsx watch src/index.ts",
+    "dev:once": "tsx src/index.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
-    "register-commands": "npm run build && node dist/register-commands.js"
+    "register-commands": "npm run build && node dist/register-commands.js",
+    "register-commands:dev": "tsx src/register-commands.ts"
   },
   "dependencies": {
     "better-sqlite3": "12.6.0",
