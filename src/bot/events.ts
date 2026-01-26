@@ -1,6 +1,6 @@
 // file: src/bot/events.ts
 import type { Client } from "discord.js";
-import type Database from "better-sqlite3";
+import type { Database as DatabaseType } from "better-sqlite3";
 import type { Logger } from "../utils/logger.js";
 import type { Statements } from "../db/statements.js";
 import type { AppConfig } from "../config/types.js";
@@ -18,7 +18,7 @@ import { createMomentsService } from "../services/moments/momentsService.js";
 
 export type BotDeps = {
   logger: Logger;
-  db: Database;
+  db: DatabaseType;
   statements: Statements;
   config: AppConfig;
 };
@@ -104,14 +104,22 @@ export function registerBotEvents(client: Client, deps: BotDeps): void {
       try {
         const userId = interaction.user.id;
         statements.users.upsertUser(userId, null);
-        statements.users.setLastSeen(userId, new Date().toISOString(), "command", null);
+        statements.users.setLastSeen(
+          userId,
+          new Date().toISOString(),
+          "command",
+          null
+        );
       } catch {
         // ignore
       }
 
       const command = commands[interaction.commandName];
       if (!command) {
-        await safeReply(interaction, { content: "Unknown command.", ephemeral: true });
+        await safeReply(interaction, {
+          content: "Unknown command.",
+          ephemeral: true
+        });
         return;
       }
 
@@ -135,7 +143,10 @@ export function registerBotEvents(client: Client, deps: BotDeps): void {
 
       // Try to inform the user, but don't crash if interaction is already acknowledged.
       try {
-        await safeReply(interaction as any, { content: "Something went wrong.", ephemeral: true });
+        await safeReply(interaction as any, {
+          content: "Something went wrong.",
+          ephemeral: true
+        });
       } catch {
         // ignore
       }
