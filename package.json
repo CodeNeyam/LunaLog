@@ -5,9 +5,8 @@
   "type": "module",
   "description": "🌙 LunaLog — Community Memory + Profile layer for Bound By Will",
   "license": "MIT",
-  "engines": {
-    "node": ">=24"
-  },
+"engines": { "node": "22.x" },
+
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "dev:once": "tsx src/index.ts",
