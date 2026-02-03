@@ -60,7 +60,26 @@ CREATE TABLE IF NOT EXISTS moments(
   created_at TEXT NOT NULL
 );
 
+-- NEW: channel ownership (for anti-farming in /top voice/chat)
+CREATE TABLE IF NOT EXISTS created_channels(
+  channel_id TEXT PRIMARY KEY,
+  guild_id TEXT NOT NULL,
+  creator_user_id TEXT NOT NULL,
+  channel_type TEXT,
+  created_at TEXT NOT NULL
+);
+
+-- NEW: idempotent weekly recap runs (avoid duplicates after restart)
+CREATE TABLE IF NOT EXISTS recap_runs(
+  week_start TEXT PRIMARY KEY,
+  posted_at TEXT NOT NULL,
+  channel_id TEXT NOT NULL,
+  message_id TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_moments_user_created ON moments(user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_interactions_user ON interactions(user_id);
 CREATE INDEX IF NOT EXISTS idx_activity_user_date ON activity_daily(user_id, date);
+
+CREATE INDEX IF NOT EXISTS idx_created_channels_creator ON created_channels(creator_user_id);
 `;

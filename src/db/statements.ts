@@ -108,7 +108,6 @@ export type Statements = {
       channelId: string | null
     ) => void;
 
-    // NEW (for /vibes server)
     listUsersVibes: () => UserVibeRow[];
   };
 
@@ -123,10 +122,14 @@ export type Statements = {
     ) => void;
     getTotals: (userId: string) => ActivityTotals;
 
-    // NEW (/top)
     topMessages: (limit: number) => Array<{ user_id: string; value: number }>;
     topVoice: (limit: number) => Array<{ user_id: string; value: number }>;
     topNight: (limit: number) => Array<{ user_id: string; value: number }>;
+
+    // NEW (weekly recap range queries)
+    topMessagesBetween: (startDateKey: string, endDateKey: string, limit: number) => Array<{ user_id: string; value: number }>;
+    topVoiceBetween: (startDateKey: string, endDateKey: string, limit: number) => Array<{ user_id: string; value: number }>;
+    totalsBetween: (startDateKey: string, endDateKey: string) => { messages: number; voice: number };
   };
 
   interactions: {
@@ -140,8 +143,6 @@ export type Statements = {
     }) => void;
 
     topMostSeenWith: (userId: string, limit: number) => InteractionTopRow[];
-
-    // NEW (/link + /top connections)
     getPair: (userId: string, otherUserId: string) => InteractionPairRow | undefined;
     topUsersByScore: (limit: number) => Array<{ user_id: string; value: number }>;
   };
@@ -151,9 +152,36 @@ export type Statements = {
     getByType: (userId: string, type: string) => MomentRow | undefined;
     getEarliest: (userId: string) => MomentRow | undefined;
 
-    // NEW (/moment)
     listRecent: (userId: string, limit: number) => MomentListRow[];
     deleteByIdForUser: (id: number, userId: string) => boolean;
+
+    // NEW (weekly recap)
+    countNotesBetween: (startIso: string, endIso: string) => number;
+    listRecentNotesBetween: (startIso: string, endIso: string, limit: number) => Array<{ user_id: string; meta: string | null; created_at: string }>;
+  };
+
+  // NEW: channel ownership tracking
+  channels: {
+    upsertCreatedChannel: (args: {
+      channelId: string;
+      guildId: string;
+      creatorUserId: string;
+      channelType: string;
+      createdAtIso: string;
+    }) => void;
+
+    getCreatorUserId: (channelId: string) => string | undefined;
+  };
+
+  // NEW: recap run registry (idempotent)
+  recap: {
+    hasRun: (weekStartDateKey: string) => boolean;
+    markRun: (args: {
+      weekStartDateKey: string;
+      postedAtIso: string;
+      channelId: string;
+      messageId: string | null;
+    }) => void;
   };
 };
 
@@ -281,7 +309,6 @@ export function buildStatements(db: Database.Database, logger: Logger): Statemen
     WHERE user_id = ?
   `);
 
-  // NEW: list vibes for server aggregation
   const listUsersVibesStmt = db.prepare(`
     SELECT user_id, chosen_vibe, inferred_vibe
     FROM users
@@ -348,7 +375,6 @@ export function buildStatements(db: Database.Database, logger: Logger): Statemen
     WHERE user_id = ?
   `);
 
-  // NEW: leaderboards
   const topMessagesStmt = db.prepare(`
     SELECT user_id, COALESCE(SUM(messages_count), 0) AS value
     FROM activity_daily
@@ -371,6 +397,33 @@ export function buildStatements(db: Database.Database, logger: Logger): Statemen
     GROUP BY user_id
     ORDER BY value DESC
     LIMIT ?
+  `);
+
+  // NEW: range leaderboards (weekly recap)
+  const topMessagesBetweenStmt = db.prepare(`
+    SELECT user_id, COALESCE(SUM(messages_count), 0) AS value
+    FROM activity_daily
+    WHERE date >= ? AND date < ?
+    GROUP BY user_id
+    ORDER BY value DESC
+    LIMIT ?
+  `);
+
+  const topVoiceBetweenStmt = db.prepare(`
+    SELECT user_id, COALESCE(SUM(voice_minutes), 0) AS value
+    FROM activity_daily
+    WHERE date >= ? AND date < ?
+    GROUP BY user_id
+    ORDER BY value DESC
+    LIMIT ?
+  `);
+
+  const totalsBetweenStmt = db.prepare(`
+    SELECT
+      COALESCE(SUM(messages_count), 0) AS messages,
+      COALESCE(SUM(voice_minutes), 0) AS voice
+    FROM activity_daily
+    WHERE date >= ? AND date < ?
   `);
 
   // ---------------------------
@@ -408,7 +461,6 @@ export function buildStatements(db: Database.Database, logger: Logger): Statemen
     LIMIT ?
   `);
 
-  // NEW: pair lookup for /link (directional)
   const getPairStmt = db.prepare(`
     SELECT user_id, other_user_id, mentions, replies, vc_minutes_together, last_interaction_at
     FROM interactions
@@ -416,7 +468,6 @@ export function buildStatements(db: Database.Database, logger: Logger): Statemen
     LIMIT 1
   `);
 
-  // NEW: top users by total interaction score (server-side)
   const topUsersByScoreStmt = db.prepare(`
     SELECT
       user_id,
@@ -451,7 +502,6 @@ export function buildStatements(db: Database.Database, logger: Logger): Statemen
     LIMIT 1
   `);
 
-  // NEW: list moment notes for /moment list
   const listRecentMomentsStmt = db.prepare(`
     SELECT id, meta, created_at
     FROM moments
@@ -460,10 +510,67 @@ export function buildStatements(db: Database.Database, logger: Logger): Statemen
     LIMIT ?
   `);
 
-  // NEW: delete moment note owned by the user
   const deleteMomentByIdForUserStmt = db.prepare(`
     DELETE FROM moments
     WHERE id = ? AND user_id = ? AND type = 'MOMENT_NOTE'
+  `);
+
+  // NEW (weekly recap): only count *saved moments* (Moment Notes)
+  const countNotesBetweenStmt = db.prepare(`
+    SELECT COUNT(*) AS c
+    FROM moments
+    WHERE type = 'MOMENT_NOTE'
+      AND created_at >= ?
+      AND created_at < ?
+  `);
+
+  const listRecentNotesBetweenStmt = db.prepare(`
+    SELECT user_id, meta, created_at
+    FROM moments
+    WHERE type = 'MOMENT_NOTE'
+      AND created_at >= ?
+      AND created_at < ?
+    ORDER BY created_at DESC
+    LIMIT ?
+  `);
+
+  // ---------------------------
+  // CHANNEL OWNERSHIP
+  // ---------------------------
+  const upsertCreatedChannelStmt = db.prepare(`
+    INSERT INTO created_channels(channel_id, guild_id, creator_user_id, channel_type, created_at)
+    VALUES(@channel_id, @guild_id, @creator_user_id, @channel_type, @created_at)
+    ON CONFLICT(channel_id) DO UPDATE SET
+      guild_id = excluded.guild_id,
+      creator_user_id = excluded.creator_user_id,
+      channel_type = excluded.channel_type,
+      created_at = excluded.created_at
+  `);
+
+  const getCreatorUserIdStmt = db.prepare(`
+    SELECT creator_user_id
+    FROM created_channels
+    WHERE channel_id = ?
+    LIMIT 1
+  `);
+
+  // ---------------------------
+  // RECAP RUNS
+  // ---------------------------
+  const hasRecapRunStmt = db.prepare(`
+    SELECT week_start
+    FROM recap_runs
+    WHERE week_start = ?
+    LIMIT 1
+  `);
+
+  const markRecapRunStmt = db.prepare(`
+    INSERT INTO recap_runs(week_start, posted_at, channel_id, message_id)
+    VALUES(@week_start, @posted_at, @channel_id, @message_id)
+    ON CONFLICT(week_start) DO UPDATE SET
+      posted_at = excluded.posted_at,
+      channel_id = excluded.channel_id,
+      message_id = excluded.message_id
   `);
 
   return {
@@ -546,12 +653,7 @@ export function buildStatements(db: Database.Database, logger: Logger): Statemen
         }
       },
 
-      setLastSeen(
-        userId: string,
-        atIso: string,
-        type: "message" | "voice" | "connection" | "command",
-        channelId: string | null
-      ) {
+      setLastSeen(userId: string, atIso: string, type: "message" | "voice" | "connection" | "command", channelId: string | null) {
         try {
           setLastSeenStmt.run({
             user_id: userId,
@@ -602,13 +704,7 @@ export function buildStatements(db: Database.Database, logger: Logger): Statemen
         }
       },
 
-      addVoice(
-        userId: string,
-        dateKey: string,
-        minutes: number,
-        bucketDeltas: Record<BucketKey, number>,
-        weekendDelta: number
-      ) {
+      addVoice(userId: string, dateKey: string, minutes: number, bucketDeltas: Record<BucketKey, number>, weekendDelta: number) {
         try {
           addVoiceStmt.run({
             user_id: userId,
@@ -667,6 +763,37 @@ export function buildStatements(db: Database.Database, logger: Logger): Statemen
         } catch (err) {
           logger.error("DB activity.topNight failed", { err: err instanceof Error ? err.message : String(err) });
           return [];
+        }
+      },
+
+      topMessagesBetween(startDateKey: string, endDateKey: string, limit: number) {
+        try {
+          return topMessagesBetweenStmt.all(startDateKey, endDateKey, limit) as Array<{ user_id: string; value: number }>;
+        } catch (err) {
+          logger.error("DB activity.topMessagesBetween failed", { err: err instanceof Error ? err.message : String(err) });
+          return [];
+        }
+      },
+
+      topVoiceBetween(startDateKey: string, endDateKey: string, limit: number) {
+        try {
+          return topVoiceBetweenStmt.all(startDateKey, endDateKey, limit) as Array<{ user_id: string; value: number }>;
+        } catch (err) {
+          logger.error("DB activity.topVoiceBetween failed", { err: err instanceof Error ? err.message : String(err) });
+          return [];
+        }
+      },
+
+      totalsBetween(startDateKey: string, endDateKey: string) {
+        try {
+          const row = totalsBetweenStmt.get(startDateKey, endDateKey) as any;
+          return {
+            messages: Number(row?.messages ?? 0),
+            voice: Number(row?.voice ?? 0)
+          };
+        } catch (err) {
+          logger.error("DB activity.totalsBetween failed", { err: err instanceof Error ? err.message : String(err) });
+          return { messages: 0, voice: 0 };
         }
       }
     },
@@ -763,6 +890,77 @@ export function buildStatements(db: Database.Database, logger: Logger): Statemen
         } catch (err) {
           logger.error("DB moments.deleteByIdForUser failed", { err: err instanceof Error ? err.message : String(err) });
           return false;
+        }
+      },
+
+      countNotesBetween(startIso: string, endIso: string) {
+        try {
+          const row = countNotesBetweenStmt.get(startIso, endIso) as any;
+          return Number(row?.c ?? 0);
+        } catch (err) {
+          logger.error("DB moments.countNotesBetween failed", { err: err instanceof Error ? err.message : String(err) });
+          return 0;
+        }
+      },
+
+      listRecentNotesBetween(startIso: string, endIso: string, limit: number) {
+        try {
+          return listRecentNotesBetweenStmt.all(startIso, endIso, limit) as Array<{ user_id: string; meta: string | null; created_at: string }>;
+        } catch (err) {
+          logger.error("DB moments.listRecentNotesBetween failed", { err: err instanceof Error ? err.message : String(err) });
+          return [];
+        }
+      }
+    },
+
+    channels: {
+      upsertCreatedChannel({ channelId, guildId, creatorUserId, channelType, createdAtIso }) {
+        try {
+          upsertCreatedChannelStmt.run({
+            channel_id: channelId,
+            guild_id: guildId,
+            creator_user_id: creatorUserId,
+            channel_type: channelType,
+            created_at: createdAtIso
+          });
+        } catch (err) {
+          logger.error("DB channels.upsertCreatedChannel failed", { err: err instanceof Error ? err.message : String(err) });
+        }
+      },
+
+      getCreatorUserId(channelId: string) {
+        try {
+          const row = getCreatorUserIdStmt.get(channelId) as any;
+          const v = row?.creator_user_id;
+          return typeof v === "string" && v.length ? v : undefined;
+        } catch (err) {
+          logger.error("DB channels.getCreatorUserId failed", { err: err instanceof Error ? err.message : String(err) });
+          return undefined;
+        }
+      }
+    },
+
+    recap: {
+      hasRun(weekStartDateKey: string) {
+        try {
+          const row = hasRecapRunStmt.get(weekStartDateKey) as any;
+          return !!row?.week_start;
+        } catch (err) {
+          logger.error("DB recap.hasRun failed", { err: err instanceof Error ? err.message : String(err) });
+          return false;
+        }
+      },
+
+      markRun({ weekStartDateKey, postedAtIso, channelId, messageId }) {
+        try {
+          markRecapRunStmt.run({
+            week_start: weekStartDateKey,
+            posted_at: postedAtIso,
+            channel_id: channelId,
+            message_id: messageId
+          });
+        } catch (err) {
+          logger.error("DB recap.markRun failed", { err: err instanceof Error ? err.message : String(err) });
         }
       }
     }

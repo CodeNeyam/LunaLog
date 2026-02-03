@@ -1,17 +1,40 @@
 {
   "timezone": "Africa/Casablanca",
+
   "tracking": {
     "trackMessages": true,
     "trackVoice": true,
     "trackInteractions": true
   },
+
   "moments": {
     "maxPerUser": 50
   },
+
   "crewBuckets": [
     { "name": "Night Crew", "startHour": 22, "endHour": 5 },
     { "name": "Morning Crew", "startHour": 6, "endHour": 11 },
     { "name": "Afternoon Crew", "startHour": 12, "endHour": 17 },
     { "name": "Evening Crew", "startHour": 18, "endHour": 21 }
-  ]
+  ],
+
+  "minFirstVcMinutes": 5,
+  "maxMostSeenWith": 3,
+
+  "personalChannels": {
+    "excludeCreatorActivity": true,
+    "useAuditLogs": true,
+    "useManageOverwriteHeuristic": true
+  },
+
+  "recap": {
+    "enabled": true,
+    "channelId": "1457410392765759601",
+    "weekday": 0,
+    "hour": 23,
+    "minute": 59,
+    "topN": 10,
+    "mentionUsers": false,
+    "includeMoments": true
+  }
 }

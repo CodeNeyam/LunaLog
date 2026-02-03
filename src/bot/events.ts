@@ -1,5 +1,6 @@
 // file: src/bot/events.ts
 import type { Client } from "discord.js";
+import { AuditLogEvent, ChannelType } from "discord.js";
 import type { Database as DatabaseType } from "better-sqlite3";
 import type { Logger } from "../utils/logger.js";
 import type { Statements } from "../db/statements.js";
@@ -15,6 +16,7 @@ import { createVoiceTracker } from "../services/tracking/voiceTracker.js";
 import { createCrewClassifier } from "../services/tracking/crewClassifier.js";
 import { createVibeInfer } from "../services/vibe/vibeInfer.js";
 import { createMomentsService } from "../services/moments/momentsService.js";
+import { startWeeklyRecapScheduler } from "../services/recap/weeklyRecap.js";
 
 export type BotDeps = {
   logger: Logger;
@@ -58,6 +60,57 @@ export function registerBotEvents(client: Client, deps: BotDeps): void {
 
   client.once("clientReady", (readyClient) => {
     logger.info("Bot ready", { user: readyClient.user?.tag ?? "unknown" });
+
+    // Start weekly recap scheduler (safe, idempotent)
+    try {
+      startWeeklyRecapScheduler({
+        client: readyClient,
+        logger,
+        statements,
+        config
+      });
+    } catch (err) {
+      logger.error("Failed to start weekly recap scheduler", { err: formatErr(err) });
+    }
+  });
+
+  // Record channel creator (best-effort). Requires "View Audit Log" permission.
+  client.on("channelCreate", async (channel) => {
+    try {
+      // guild-only channels
+      if (!("guild" in channel)) return;
+
+      const guild = (channel as any).guild;
+      if (!guild?.id || !channel?.id) return;
+
+      // only store likely relevant channel types
+      const type = (channel as any).type as ChannelType | number;
+      const allowed =
+        type === ChannelType.GuildText ||
+        type === ChannelType.GuildVoice ||
+        type === ChannelType.GuildStageVoice ||
+        type === ChannelType.GuildForum ||
+        type === ChannelType.GuildAnnouncement;
+
+      if (!allowed) return;
+
+      const logs = await guild.fetchAuditLogs({ type: AuditLogEvent.ChannelCreate, limit: 8 }).catch(() => null);
+      const entry = logs?.entries?.find((e: any) => e?.targetId === channel.id);
+      const executorId = entry?.executor?.id;
+
+      if (!executorId) return;
+
+      statements.channels.upsertCreatedChannel({
+        channelId: channel.id,
+        guildId: guild.id,
+        creatorUserId: executorId,
+        channelType: String(type),
+        createdAtIso: new Date().toISOString()
+      });
+    } catch (err) {
+      // don't spam logs on permission issues
+      logger.debug("channelCreate ownership capture failed (ignored)", { err: formatErr(err) });
+    }
   });
 
   client.on("guildMemberAdd", async (member) => {
@@ -100,7 +153,6 @@ export function registerBotEvents(client: Client, deps: BotDeps): void {
     try {
       if (!interaction.isChatInputCommand()) return;
 
-      // mark lastSeen as "command"
       try {
         const userId = interaction.user.id;
         statements.users.upsertUser(userId, null);
@@ -123,7 +175,6 @@ export function registerBotEvents(client: Client, deps: BotDeps): void {
         return;
       }
 
-      // Always defer once, then command should editReply/followUp via safe helpers.
       await safeDeferReply(interaction, true);
 
       await command.execute({
@@ -141,7 +192,6 @@ export function registerBotEvents(client: Client, deps: BotDeps): void {
         message: (err as any)?.message
       });
 
-      // Try to inform the user, but don't crash if interaction is already acknowledged.
       try {
         await safeReply(interaction as any, {
           content: "Something went wrong.",

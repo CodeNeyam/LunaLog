@@ -1,5 +1,6 @@
 // file: src/services/tracking/voiceTracker.ts
 import type { VoiceState } from "discord.js";
+import { AuditLogEvent, PermissionsBitField } from "discord.js";
 import type { Logger } from "../../utils/logger.js";
 import type { Statements, BucketKey } from "../../db/statements.js";
 import type { AppConfig } from "../../config/types.js";
@@ -24,6 +25,71 @@ export function createVoiceTracker(deps: {
   const { logger, statements, config, momentsService } = deps;
 
   const sessions = new Map<string, VoiceSession>();
+  const checkedAuditForChannel = new Set<string>();
+
+  function hasExplicitOwnerOverwrite(channel: any, userId: string): boolean {
+    try {
+      const ow = channel?.permissionOverwrites?.cache?.get(userId);
+      const allow = ow?.allow;
+      if (!allow) return false;
+
+      return (
+        allow.has(PermissionsBitField.Flags.ManageChannels) ||
+        allow.has(PermissionsBitField.Flags.MoveMembers) ||
+        allow.has(PermissionsBitField.Flags.MuteMembers)
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  async function maybeResolveChannelCreatorId(guild: any, channelId: string, channelType: any): Promise<string | undefined> {
+    const existing = statements.channels.getCreatorUserId(channelId);
+    if (existing) return existing;
+
+    if (!config.settings.personalChannels.useAuditLogs) return undefined;
+    if (checkedAuditForChannel.has(channelId)) return undefined;
+
+    checkedAuditForChannel.add(channelId);
+
+    try {
+      const logs = await guild.fetchAuditLogs({ type: AuditLogEvent.ChannelCreate, limit: 8 }).catch(() => null);
+      const entry = logs?.entries?.find((e: any) => e?.targetId === channelId);
+      const executorId = entry?.executor?.id;
+      if (!executorId) return undefined;
+
+      statements.channels.upsertCreatedChannel({
+        channelId,
+        guildId: guild.id,
+        creatorUserId: executorId,
+        channelType: String(channelType ?? "unknown"),
+        createdAtIso: new Date().toISOString()
+      });
+
+      return executorId;
+    } catch (err) {
+      logger.debug("Voice audit log creator resolve failed (ignored)", { err: err instanceof Error ? err.message : String(err) });
+      return undefined;
+    }
+  }
+
+  async function shouldCountVoiceForUser(guild: any, channel: any, userId: string): Promise<boolean> {
+    if (!config.settings.personalChannels.excludeCreatorActivity) return true;
+
+    const channelId = channel?.id;
+    if (!channelId) return true;
+
+    // owner-by-db (created by user)
+    const creatorId = await maybeResolveChannelCreatorId(guild, channelId, channel?.type);
+    if (creatorId && creatorId === userId) return false;
+
+    // fallback heuristic
+    if (config.settings.personalChannels.useManageOverwriteHeuristic) {
+      if (hasExplicitOwnerOverwrite(channel, userId)) return false;
+    }
+
+    return true;
+  }
 
   async function endSession(oldState: VoiceState, newState: VoiceState, userId: string, channelId: string): Promise<void> {
     const session = sessions.get(userId);
@@ -42,25 +108,37 @@ export function createVoiceTracker(deps: {
 
     const endIso = new Date(endAtMs).toISOString();
 
-    // LAST VC + LAST seen
+    // Keep LAST VC + LAST seen always (even if we skip counting)
     statements.users.setLastVc(userId, endIso, channelId, totalMinutes);
     statements.users.setLastSeen(userId, endIso, "voice", channelId);
 
-    const split = splitMinutesByBucketUTC(startAt, endAt);
+    const guild = newState.guild ?? oldState.guild;
+    const channel = guild.channels.cache.get(channelId) as any;
 
-    for (const day of split.days) {
-      const bucketDeltas: Record<BucketKey, number> = {
-        night: day.buckets.night,
-        morning: day.buckets.morning,
-        afternoon: day.buckets.afternoon,
-        evening: day.buckets.evening
-      };
-      statements.activity.addVoice(userId, day.dateKey, day.totalMinutes, bucketDeltas, day.weekendMinutes);
+    // ✅ Count voice only if tracking enabled AND not in user's own channel
+    const trackVoice = config.settings.tracking.trackVoice !== false;
+    let shouldCount = true;
+
+    if (trackVoice) {
+      shouldCount = await shouldCountVoiceForUser(guild as any, channel as any, userId);
+      if (shouldCount) {
+        const split = splitMinutesByBucketUTC(startAt, endAt);
+
+        for (const day of split.days) {
+          const bucketDeltas: Record<BucketKey, number> = {
+            night: day.buckets.night,
+            morning: day.buckets.morning,
+            afternoon: day.buckets.afternoon,
+            evening: day.buckets.evening
+          };
+          statements.activity.addVoice(userId, day.dateKey, day.totalMinutes, bucketDeltas, day.weekendMinutes);
+        }
+      }
     }
 
+    // FIRST VC moment still works (even if not counted)
     const hasFirstVc = momentsService.getMomentByType(userId, "FIRST_VC");
     if (!hasFirstVc && totalMinutes >= config.settings.minFirstVcMinutes) {
-      const channel = (newState.guild ?? oldState.guild).channels.cache.get(channelId) as any;
       const meta = {
         channelId,
         channelName: typeof channel?.name === "string" ? channel.name : "unknown",
@@ -69,13 +147,8 @@ export function createVoiceTracker(deps: {
       await momentsService.ensureMoment(userId, "FIRST_VC", meta, endIso);
     }
 
-    // Overlap tracking approximation:
-    // When a user leaves, compute overlap minutes with users currently still in that channel.
-    // overlapStart = max(joinTimes), overlapEnd = now (leave time).
-    // This accumulates over time as users leave and rejoin.
+    // Overlap tracking stays as-is (not requested to change)
     try {
-      const guild = newState.guild ?? oldState.guild;
-      const channel = guild.channels.cache.get(channelId) as any;
       const members = channel?.members as Map<string, any> | undefined;
       if (!members) return;
 
@@ -108,9 +181,6 @@ export function createVoiceTracker(deps: {
           vcMinutesDelta: overlapMinutes,
           lastInteractionAtIso: atIso
         });
-
-        // Optional: if you want VC overlap to count as "connection" in /journey:
-        // statements.users.setLastConnection(userId, atIso, otherId, "vc");
       }
     } catch (err) {
       logger.debug("VC overlap tracking failed (ignored)", { err: err instanceof Error ? err.message : String(err) });

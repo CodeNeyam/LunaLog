@@ -1,5 +1,6 @@
 // file: src/services/tracking/messageTracker.ts
 import type { Message } from "discord.js";
+import { AuditLogEvent, PermissionsBitField } from "discord.js";
 import type { Logger } from "../../utils/logger.js";
 import type { Statements } from "../../db/statements.js";
 import type { AppConfig } from "../../config/types.js";
@@ -21,18 +22,79 @@ export function createMessageTracker(deps: {
   vibeInfer: VibeInfer;
   interactionTracker: InteractionTracker;
 }): MessageTracker {
-  const { logger, statements, momentsService, vibeInfer, interactionTracker } = deps;
+  const { logger, statements, config, momentsService, vibeInfer, interactionTracker } = deps;
+
+  const checkedAuditForChannel = new Set<string>();
+
+  function hasExplicitOwnerOverwrite(channel: any, userId: string): boolean {
+    try {
+      const ow = channel?.permissionOverwrites?.cache?.get(userId);
+      const allow = ow?.allow;
+      if (!allow) return false;
+
+      return (
+        allow.has(PermissionsBitField.Flags.ManageChannels) ||
+        allow.has(PermissionsBitField.Flags.ManageMessages)
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  async function maybeResolveChannelCreatorId(full: any, channelId: string): Promise<string | undefined> {
+    const existing = statements.channels.getCreatorUserId(channelId);
+    if (existing) return existing;
+
+    if (!config.settings.personalChannels.useAuditLogs) return undefined;
+    if (checkedAuditForChannel.has(channelId)) return undefined;
+
+    checkedAuditForChannel.add(channelId);
+
+    try {
+      const guild = full.guild;
+      if (!guild) return undefined;
+
+      const logs = await guild.fetchAuditLogs({ type: AuditLogEvent.ChannelCreate, limit: 8 }).catch(() => null);
+      const entry = logs?.entries?.find((e: any) => e?.targetId === channelId);
+      const executorId = entry?.executor?.id;
+      if (!executorId) return undefined;
+
+      statements.channels.upsertCreatedChannel({
+        channelId,
+        guildId: guild.id,
+        creatorUserId: executorId,
+        channelType: String((full.channel as any)?.type ?? "unknown"),
+        createdAtIso: new Date().toISOString()
+      });
+
+      return executorId;
+    } catch (err) {
+      logger.debug("Audit log creator resolve failed (ignored)", { err: err instanceof Error ? err.message : String(err) });
+      return undefined;
+    }
+  }
+
+  async function shouldCountMessageForUser(full: any, userId: string): Promise<boolean> {
+    if (!config.settings.personalChannels.excludeCreatorActivity) return true;
+
+    // owner-by-db (created by user)
+    const creatorId = await maybeResolveChannelCreatorId(full, full.channelId);
+    if (creatorId && creatorId === userId) return false;
+
+    // fallback heuristic
+    if (config.settings.personalChannels.useManageOverwriteHeuristic) {
+      if (hasExplicitOwnerOverwrite(full.channel, userId)) return false;
+    }
+
+    return true;
+  }
 
   async function onMessage(message: Message): Promise<void> {
     if (!message) return;
 
-    // Ignore bot messages
     if (message.author?.bot) return;
-
-    // Guild only
     if (!message.guildId) return;
 
-    // Ensure full message if partial
     const full = await safeFetchMessageIfPartial(message).catch(() => message);
 
     const userId = full.author?.id;
@@ -40,15 +102,12 @@ export function createMessageTracker(deps: {
 
     const atIso = full.createdAt.toISOString();
 
-    // Ensure user row exists
     const joinIso = full.member?.joinedAt ? full.member.joinedAt.toISOString() : null;
     statements.users.upsertUser(userId, joinIso);
 
-    // LAST message + LAST seen
     statements.users.setLastMessage(userId, atIso, full.channelId);
     statements.users.setLastSeen(userId, atIso, "message", full.channelId);
 
-    // First message moment
     const hasFirstMsg = momentsService.getMomentByType(userId, "FIRST_MESSAGE");
     if (!hasFirstMsg) {
       const channelName = (() => {
@@ -68,13 +127,19 @@ export function createMessageTracker(deps: {
       await momentsService.ensureMoment(userId, "FIRST_MESSAGE", meta, atIso);
     }
 
-    // Activity counters
-    const dateKey = toDateKeyUTC(full.createdAt);
-    const bucket = bucketFromDateUTC(full.createdAt);
-    const weekendDelta = isWeekendUTC(full.createdAt) ? 1 : 0;
-    statements.activity.addMessage(userId, dateKey, bucket, weekendDelta);
+    // ✅ Count message only if tracking enabled AND not in user's own channel
+    const trackMessages = config.settings.tracking.trackMessages !== false;
+    if (trackMessages) {
+      const ok = await shouldCountMessageForUser(full as any, userId);
+      if (ok) {
+        const dateKey = toDateKeyUTC(full.createdAt);
+        const bucket = bucketFromDateUTC(full.createdAt);
+        const weekendDelta = isWeekendUTC(full.createdAt) ? 1 : 0;
+        statements.activity.addMessage(userId, dateKey, bucket, weekendDelta);
+      }
+    }
 
-    // Interactions + first connection moment + LAST connection snapshot
+    // Interactions
     const { firstConnectionCandidate, lastConnectionCandidate } = await interactionTracker.recordFromMessage(full);
 
     if (firstConnectionCandidate) {
@@ -99,7 +164,7 @@ export function createMessageTracker(deps: {
       statements.users.setLastSeen(userId, atIso, "connection", full.channelId);
     }
 
-    // Vibe inference (channels + keywords)
+    // Vibe inference
     try {
       await vibeInfer.onMessage(full);
     } catch (err) {
