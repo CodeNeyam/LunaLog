@@ -6,11 +6,21 @@ import { buildSimpleEmbed } from "../utils/embeds.js";
 type Mode = "chat" | "voice" | "night" | "connections";
 
 const MODE_LABEL: Record<Mode, string> = {
-  chat: "💬 Top Chatters",
-  voice: "🎙️ Top Voice",
-  night: "🌙 Top Night Crew",
+  chat: "💬 Top Chatters (Scoped)",
+  voice: "🎙️ Top Voice (Scoped)",
+  night: "🌙 Top Night Crew (Scoped)",
   connections: "🔗 Top Connections"
 };
+
+// ✅ scoped filters
+const MESSAGE_CATEGORY_IDS = [
+  "1457409752735682702", // Main Chat
+  "1457409790388076871"  // Hobbies
+];
+
+const VOICE_CATEGORY_IDS = [
+  "1457409835200151695" // Voice Channels category
+];
 
 export const topCommand: Command = {
   data: new SlashCommandBuilder()
@@ -38,9 +48,10 @@ export const topCommand: Command = {
 
     let rows: Array<{ user_id: string; value: number }> = [];
 
-    if (mode === "chat") rows = statements.activity.topMessages(limit);
-    if (mode === "voice") rows = statements.activity.topVoice(limit);
-    if (mode === "night") rows = statements.activity.topNight(limit);
+    // ✅ swap global leaderboards with scoped ones (same command/options)
+    if (mode === "chat") rows = statements.activity.topMessagesScoped(MESSAGE_CATEGORY_IDS, limit);
+    if (mode === "voice") rows = statements.activity.topVoiceScoped(VOICE_CATEGORY_IDS, limit);
+    if (mode === "night") rows = statements.activity.topNightScoped(MESSAGE_CATEGORY_IDS, limit);
     if (mode === "connections") rows = statements.interactions.topUsersByScore(limit);
 
     const lines = rows.length

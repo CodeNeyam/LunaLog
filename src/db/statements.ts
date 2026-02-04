@@ -81,6 +81,18 @@ export type ActivityTotals = {
 
 export type BucketKey = "night" | "morning" | "afternoon" | "evening";
 
+export type ScopedTotals = {
+  messages: number;
+  voice: number;
+  night: number;
+  morning: number;
+  afternoon: number;
+  evening: number;
+  weekend: number;
+};
+
+export type ScopedLeaderboardRow = { user_id: string; value: number };
+
 /** =========================
  *  Statements API
  *  ========================= */
@@ -130,6 +142,27 @@ export type Statements = {
     topMessagesBetween: (startDateKey: string, endDateKey: string, limit: number) => Array<{ user_id: string; value: number }>;
     topVoiceBetween: (startDateKey: string, endDateKey: string, limit: number) => Array<{ user_id: string; value: number }>;
     totalsBetween: (startDateKey: string, endDateKey: string) => { messages: number; voice: number };
+
+    // ✅ NEW: scoped methods (ADDED ONLY)
+    addMessageScoped: (userId: string, dateKey: string, categoryId: string, bucket: BucketKey, weekendDelta: number) => void;
+    addVoiceScoped: (
+      userId: string,
+      dateKey: string,
+      categoryId: string,
+      minutes: number,
+      bucketDeltas: Record<BucketKey, number>,
+      weekendDelta: number
+    ) => void;
+
+    getTotalsScoped: (userId: string, categoryIds: string[]) => ScopedTotals;
+
+    topMessagesScoped: (categoryIds: string[], limit: number) => ScopedLeaderboardRow[];
+    topVoiceScoped: (categoryIds: string[], limit: number) => ScopedLeaderboardRow[];
+    topNightScoped: (categoryIds: string[], limit: number) => ScopedLeaderboardRow[];
+
+    topMessagesScopedBetween: (categoryIds: string[], startDateKey: string, endDateKey: string, limit: number) => ScopedLeaderboardRow[];
+    topVoiceScopedBetween: (categoryIds: string[], startDateKey: string, endDateKey: string, limit: number) => ScopedLeaderboardRow[];
+    totalsScopedBetween: (categoryIds: string[], startDateKey: string, endDateKey: string) => { messages: number; voice: number };
   };
 
   interactions: {
@@ -145,6 +178,9 @@ export type Statements = {
     topMostSeenWith: (userId: string, limit: number) => InteractionTopRow[];
     getPair: (userId: string, otherUserId: string) => InteractionPairRow | undefined;
     topUsersByScore: (limit: number) => Array<{ user_id: string; value: number }>;
+
+    // ✅ NEW: summary for /about (ADDED ONLY)
+    getSummary: (userId: string) => { links: number; score: number };
   };
 
   moments: {
@@ -316,7 +352,7 @@ export function buildStatements(db: Database.Database, logger: Logger): Statemen
   `);
 
   // ---------------------------
-  // ACTIVITY
+  // ACTIVITY (global)
   // ---------------------------
   const addMessageStmt = db.prepare(`
     INSERT INTO activity_daily(
@@ -399,7 +435,6 @@ export function buildStatements(db: Database.Database, logger: Logger): Statemen
     LIMIT ?
   `);
 
-  // NEW: range leaderboards (weekly recap)
   const topMessagesBetweenStmt = db.prepare(`
     SELECT user_id, COALESCE(SUM(messages_count), 0) AS value
     FROM activity_daily
@@ -425,6 +460,156 @@ export function buildStatements(db: Database.Database, logger: Logger): Statemen
     FROM activity_daily
     WHERE date >= ? AND date < ?
   `);
+
+  // ---------------------------
+  // ACTIVITY (scoped) ✅ NEW
+  // ---------------------------
+  const addMessageScopedStmt = db.prepare(`
+    INSERT INTO activity_scoped_daily(
+      user_id, date, category_id,
+      messages_count, voice_minutes,
+      bucket_night, bucket_morning, bucket_afternoon, bucket_evening,
+      weekend_count
+    )
+    VALUES(
+      @user_id, @date, @category_id,
+      @messages_count, 0,
+      @bucket_night, @bucket_morning, @bucket_afternoon, @bucket_evening,
+      @weekend_count
+    )
+    ON CONFLICT(user_id, date, category_id) DO UPDATE SET
+      messages_count = activity_scoped_daily.messages_count + excluded.messages_count,
+      bucket_night = activity_scoped_daily.bucket_night + excluded.bucket_night,
+      bucket_morning = activity_scoped_daily.bucket_morning + excluded.bucket_morning,
+      bucket_afternoon = activity_scoped_daily.bucket_afternoon + excluded.bucket_afternoon,
+      bucket_evening = activity_scoped_daily.bucket_evening + excluded.bucket_evening,
+      weekend_count = activity_scoped_daily.weekend_count + excluded.weekend_count
+  `);
+
+  const addVoiceScopedStmt = db.prepare(`
+    INSERT INTO activity_scoped_daily(
+      user_id, date, category_id,
+      messages_count, voice_minutes,
+      bucket_night, bucket_morning, bucket_afternoon, bucket_evening,
+      weekend_count
+    )
+    VALUES(
+      @user_id, @date, @category_id,
+      0, @voice_minutes,
+      @bucket_night, @bucket_morning, @bucket_afternoon, @bucket_evening,
+      @weekend_count
+    )
+    ON CONFLICT(user_id, date, category_id) DO UPDATE SET
+      voice_minutes = activity_scoped_daily.voice_minutes + excluded.voice_minutes,
+      bucket_night = activity_scoped_daily.bucket_night + excluded.bucket_night,
+      bucket_morning = activity_scoped_daily.bucket_morning + excluded.bucket_morning,
+      bucket_afternoon = activity_scoped_daily.bucket_afternoon + excluded.bucket_afternoon,
+      bucket_evening = activity_scoped_daily.bucket_evening + excluded.bucket_evening,
+      weekend_count = activity_scoped_daily.weekend_count + excluded.weekend_count
+  `);
+
+  function makeInPlaceholders(n: number): string {
+    if (!Number.isFinite(n) || n <= 0) return "NULL";
+    return Array.from({ length: n }).map(() => "?").join(", ");
+  }
+
+  function getTotalsScopedImpl(userId: string, categoryIds: string[]): ScopedTotals {
+    if (!categoryIds?.length) {
+      return { messages: 0, voice: 0, night: 0, morning: 0, afternoon: 0, evening: 0, weekend: 0 };
+    }
+
+    const sql = `
+      SELECT
+        COALESCE(SUM(bucket_night), 0) AS night,
+        COALESCE(SUM(bucket_morning), 0) AS morning,
+        COALESCE(SUM(bucket_afternoon), 0) AS afternoon,
+        COALESCE(SUM(bucket_evening), 0) AS evening,
+        COALESCE(SUM(weekend_count), 0) AS weekend,
+        COALESCE(SUM(messages_count), 0) AS messages,
+        COALESCE(SUM(voice_minutes), 0) AS voice
+      FROM activity_scoped_daily
+      WHERE user_id = ?
+        AND category_id IN (${makeInPlaceholders(categoryIds.length)})
+    `;
+
+    try {
+      const row = db.prepare(sql).get(userId, ...categoryIds) as any;
+      return {
+        night: Number(row?.night ?? 0),
+        morning: Number(row?.morning ?? 0),
+        afternoon: Number(row?.afternoon ?? 0),
+        evening: Number(row?.evening ?? 0),
+        weekend: Number(row?.weekend ?? 0),
+        messages: Number(row?.messages ?? 0),
+        voice: Number(row?.voice ?? 0)
+      };
+    } catch (err) {
+      logger.error("DB activity.getTotalsScoped failed", { err: err instanceof Error ? err.message : String(err) });
+      return { messages: 0, voice: 0, night: 0, morning: 0, afternoon: 0, evening: 0, weekend: 0 };
+    }
+  }
+
+  function topScopedSum(column: "messages_count" | "voice_minutes" | "bucket_night", categoryIds: string[], limit: number): ScopedLeaderboardRow[] {
+    if (!categoryIds?.length) return [];
+    const sql = `
+      SELECT user_id, COALESCE(SUM(${column}), 0) AS value
+      FROM activity_scoped_daily
+      WHERE category_id IN (${makeInPlaceholders(categoryIds.length)})
+      GROUP BY user_id
+      ORDER BY value DESC
+      LIMIT ?
+    `;
+    try {
+      return db.prepare(sql).all(...categoryIds, limit) as ScopedLeaderboardRow[];
+    } catch (err) {
+      logger.error("DB activity.topScopedSum failed", { err: err instanceof Error ? err.message : String(err) });
+      return [];
+    }
+  }
+
+  function topScopedSumBetween(
+    column: "messages_count" | "voice_minutes",
+    categoryIds: string[],
+    startDateKey: string,
+    endDateKey: string,
+    limit: number
+  ): ScopedLeaderboardRow[] {
+    if (!categoryIds?.length) return [];
+    const sql = `
+      SELECT user_id, COALESCE(SUM(${column}), 0) AS value
+      FROM activity_scoped_daily
+      WHERE date >= ? AND date < ?
+        AND category_id IN (${makeInPlaceholders(categoryIds.length)})
+      GROUP BY user_id
+      ORDER BY value DESC
+      LIMIT ?
+    `;
+    try {
+      return db.prepare(sql).all(startDateKey, endDateKey, ...categoryIds, limit) as ScopedLeaderboardRow[];
+    } catch (err) {
+      logger.error("DB activity.topScopedSumBetween failed", { err: err instanceof Error ? err.message : String(err) });
+      return [];
+    }
+  }
+
+  function totalsScopedBetweenImpl(categoryIds: string[], startDateKey: string, endDateKey: string): { messages: number; voice: number } {
+    if (!categoryIds?.length) return { messages: 0, voice: 0 };
+    const sql = `
+      SELECT
+        COALESCE(SUM(messages_count), 0) AS messages,
+        COALESCE(SUM(voice_minutes), 0) AS voice
+      FROM activity_scoped_daily
+      WHERE date >= ? AND date < ?
+        AND category_id IN (${makeInPlaceholders(categoryIds.length)})
+    `;
+    try {
+      const row = db.prepare(sql).get(startDateKey, endDateKey, ...categoryIds) as any;
+      return { messages: Number(row?.messages ?? 0), voice: Number(row?.voice ?? 0) };
+    } catch (err) {
+      logger.error("DB activity.totalsScopedBetween failed", { err: err instanceof Error ? err.message : String(err) });
+      return { messages: 0, voice: 0 };
+    }
+  }
 
   // ---------------------------
   // INTERACTIONS
@@ -478,6 +663,14 @@ export function buildStatements(db: Database.Database, logger: Logger): Statemen
     LIMIT ?
   `);
 
+  const interactionsSummaryStmt = db.prepare(`
+    SELECT
+      COALESCE(COUNT(*), 0) AS links,
+      COALESCE(SUM(mentions * 2 + replies * 3 + vc_minutes_together), 0) AS score
+    FROM interactions
+    WHERE user_id = ?
+  `);
+
   // ---------------------------
   // MOMENTS
   // ---------------------------
@@ -515,7 +708,6 @@ export function buildStatements(db: Database.Database, logger: Logger): Statemen
     WHERE id = ? AND user_id = ? AND type = 'MOMENT_NOTE'
   `);
 
-  // NEW (weekly recap): only count *saved moments* (Moment Notes)
   const countNotesBetweenStmt = db.prepare(`
     SELECT COUNT(*) AS c
     FROM moments
@@ -795,6 +987,71 @@ export function buildStatements(db: Database.Database, logger: Logger): Statemen
           logger.error("DB activity.totalsBetween failed", { err: err instanceof Error ? err.message : String(err) });
           return { messages: 0, voice: 0 };
         }
+      },
+
+      // ✅ NEW: scoped methods
+      addMessageScoped(userId: string, dateKey: string, categoryId: string, bucket: BucketKey, weekendDelta: number) {
+        try {
+          addMessageScopedStmt.run({
+            user_id: userId,
+            date: dateKey,
+            category_id: categoryId,
+            messages_count: 1,
+            bucket_night: bucket === "night" ? 1 : 0,
+            bucket_morning: bucket === "morning" ? 1 : 0,
+            bucket_afternoon: bucket === "afternoon" ? 1 : 0,
+            bucket_evening: bucket === "evening" ? 1 : 0,
+            weekend_count: weekendDelta
+          });
+        } catch (err) {
+          logger.error("DB activity.addMessageScoped failed", { err: err instanceof Error ? err.message : String(err) });
+        }
+      },
+
+      addVoiceScoped(userId: string, dateKey: string, categoryId: string, minutes: number, bucketDeltas: Record<BucketKey, number>, weekendDelta: number) {
+        try {
+          addVoiceScopedStmt.run({
+            user_id: userId,
+            date: dateKey,
+            category_id: categoryId,
+            voice_minutes: minutes,
+            bucket_night: bucketDeltas.night ?? 0,
+            bucket_morning: bucketDeltas.morning ?? 0,
+            bucket_afternoon: bucketDeltas.afternoon ?? 0,
+            bucket_evening: bucketDeltas.evening ?? 0,
+            weekend_count: weekendDelta
+          });
+        } catch (err) {
+          logger.error("DB activity.addVoiceScoped failed", { err: err instanceof Error ? err.message : String(err) });
+        }
+      },
+
+      getTotalsScoped(userId: string, categoryIds: string[]) {
+        return getTotalsScopedImpl(userId, categoryIds);
+      },
+
+      topMessagesScoped(categoryIds: string[], limit: number) {
+        return topScopedSum("messages_count", categoryIds, limit);
+      },
+
+      topVoiceScoped(categoryIds: string[], limit: number) {
+        return topScopedSum("voice_minutes", categoryIds, limit);
+      },
+
+      topNightScoped(categoryIds: string[], limit: number) {
+        return topScopedSum("bucket_night", categoryIds, limit);
+      },
+
+      topMessagesScopedBetween(categoryIds: string[], startDateKey: string, endDateKey: string, limit: number) {
+        return topScopedSumBetween("messages_count", categoryIds, startDateKey, endDateKey, limit);
+      },
+
+      topVoiceScopedBetween(categoryIds: string[], startDateKey: string, endDateKey: string, limit: number) {
+        return topScopedSumBetween("voice_minutes", categoryIds, startDateKey, endDateKey, limit);
+      },
+
+      totalsScopedBetween(categoryIds: string[], startDateKey: string, endDateKey: string) {
+        return totalsScopedBetweenImpl(categoryIds, startDateKey, endDateKey);
       }
     },
 
@@ -838,6 +1095,19 @@ export function buildStatements(db: Database.Database, logger: Logger): Statemen
         } catch (err) {
           logger.error("DB interactions.topUsersByScore failed", { err: err instanceof Error ? err.message : String(err) });
           return [];
+        }
+      },
+
+      getSummary(userId: string) {
+        try {
+          const row = interactionsSummaryStmt.get(userId) as any;
+          return {
+            links: Number(row?.links ?? 0),
+            score: Number(row?.score ?? 0)
+          };
+        } catch (err) {
+          logger.error("DB interactions.getSummary failed", { err: err instanceof Error ? err.message : String(err) });
+          return { links: 0, score: 0 };
         }
       }
     },

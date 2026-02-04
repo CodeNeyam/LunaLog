@@ -42,6 +42,21 @@ CREATE TABLE IF NOT EXISTS activity_daily(
   PRIMARY KEY(user_id, date)
 );
 
+-- ✅ NEW: scoped daily stats (per category)
+CREATE TABLE IF NOT EXISTS activity_scoped_daily(
+  user_id TEXT NOT NULL,
+  date TEXT NOT NULL,
+  category_id TEXT NOT NULL,
+  messages_count INTEGER NOT NULL DEFAULT 0,
+  voice_minutes INTEGER NOT NULL DEFAULT 0,
+  bucket_night INTEGER NOT NULL DEFAULT 0,
+  bucket_morning INTEGER NOT NULL DEFAULT 0,
+  bucket_afternoon INTEGER NOT NULL DEFAULT 0,
+  bucket_evening INTEGER NOT NULL DEFAULT 0,
+  weekend_count INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY(user_id, date, category_id)
+);
+
 CREATE TABLE IF NOT EXISTS interactions(
   user_id TEXT NOT NULL,
   other_user_id TEXT NOT NULL,
@@ -80,6 +95,10 @@ CREATE TABLE IF NOT EXISTS recap_runs(
 CREATE INDEX IF NOT EXISTS idx_moments_user_created ON moments(user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_interactions_user ON interactions(user_id);
 CREATE INDEX IF NOT EXISTS idx_activity_user_date ON activity_daily(user_id, date);
+
+-- ✅ scoped indexes
+CREATE INDEX IF NOT EXISTS idx_activity_scoped_user_date ON activity_scoped_daily(user_id, date);
+CREATE INDEX IF NOT EXISTS idx_activity_scoped_category_date ON activity_scoped_daily(category_id, date);
 
 CREATE INDEX IF NOT EXISTS idx_created_channels_creator ON created_channels(creator_user_id);
 `;

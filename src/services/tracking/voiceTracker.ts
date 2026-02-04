@@ -16,6 +16,9 @@ export type VoiceTracker = {
   onVoiceStateUpdate: (oldState: VoiceState, newState: VoiceState) => Promise<void>;
 };
 
+// ✅ hardcoded scoped voice category
+const SCOPED_VOICE_CATEGORY_ID = "1457409835200151695";
+
 export function createVoiceTracker(deps: {
   logger: Logger;
   statements: Statements;
@@ -79,16 +82,24 @@ export function createVoiceTracker(deps: {
     const channelId = channel?.id;
     if (!channelId) return true;
 
-    // owner-by-db (created by user)
     const creatorId = await maybeResolveChannelCreatorId(guild, channelId, channel?.type);
     if (creatorId && creatorId === userId) return false;
 
-    // fallback heuristic
     if (config.settings.personalChannels.useManageOverwriteHeuristic) {
       if (hasExplicitOwnerOverwrite(channel, userId)) return false;
     }
 
     return true;
+  }
+
+  function resolveScopedCategoryId(channel: any): string | undefined {
+    try {
+      const parentId = channel?.parentId;
+      if (typeof parentId !== "string" || !parentId.length) return undefined;
+      return parentId === SCOPED_VOICE_CATEGORY_ID ? parentId : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   async function endSession(oldState: VoiceState, newState: VoiceState, userId: string, channelId: string): Promise<void> {
@@ -115,15 +126,14 @@ export function createVoiceTracker(deps: {
     const guild = newState.guild ?? oldState.guild;
     const channel = guild.channels.cache.get(channelId) as any;
 
-    // ✅ Count voice only if tracking enabled AND not in user's own channel
     const trackVoice = config.settings.tracking.trackVoice !== false;
-    let shouldCount = true;
 
     if (trackVoice) {
-      shouldCount = await shouldCountVoiceForUser(guild as any, channel as any, userId);
+      const shouldCount = await shouldCountVoiceForUser(guild as any, channel as any, userId);
       if (shouldCount) {
         const split = splitMinutesByBucketUTC(startAt, endAt);
 
+        // ✅ existing global count (unchanged)
         for (const day of split.days) {
           const bucketDeltas: Record<BucketKey, number> = {
             night: day.buckets.night,
@@ -132,6 +142,27 @@ export function createVoiceTracker(deps: {
             evening: day.buckets.evening
           };
           statements.activity.addVoice(userId, day.dateKey, day.totalMinutes, bucketDeltas, day.weekendMinutes);
+        }
+
+        // ✅ NEW: scoped voice minutes (only if channel is inside allowed voice category)
+        const scopedCategoryId = resolveScopedCategoryId(channel);
+        if (scopedCategoryId) {
+          for (const day of split.days) {
+            const bucketDeltas: Record<BucketKey, number> = {
+              night: day.buckets.night,
+              morning: day.buckets.morning,
+              afternoon: day.buckets.afternoon,
+              evening: day.buckets.evening
+            };
+            statements.activity.addVoiceScoped(
+              userId,
+              day.dateKey,
+              scopedCategoryId,
+              day.totalMinutes,
+              bucketDeltas,
+              day.weekendMinutes
+            );
+          }
         }
       }
     }

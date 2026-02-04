@@ -8,6 +8,15 @@ import { toDateKeyUTC } from "../../utils/time.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+// ✅ scoped filters
+const MESSAGE_CATEGORY_IDS = [
+  "1457409752735682702", // Main Chat
+  "1457409790388076871"  // Hobbies
+];
+const VOICE_CATEGORY_IDS = [
+  "1457409835200151695" // Voice Channels category
+];
+
 /**
  * Safely add days to a UTC dateKey (YYYY-MM-DD)
  */
@@ -83,7 +92,6 @@ function getZonedParts(
 
 /**
  * Convert a "local time in timezone" into UTC ms
- * (iterative correction, no deps, DST-safe)
  */
 function zonedToUtcMs(
   args: { year: number; month: number; day: number; hour: number; minute: number },
@@ -94,25 +102,8 @@ function zonedToUtcMs(
   for (let i = 0; i < 4; i++) {
     const p = getZonedParts(new Date(guess), timeZone);
 
-    const desiredNaive = Date.UTC(
-      args.year,
-      args.month - 1,
-      args.day,
-      args.hour,
-      args.minute,
-      0,
-      0
-    );
-
-    const gotNaive = Date.UTC(
-      p.year,
-      p.month - 1,
-      p.day,
-      p.hour,
-      p.minute,
-      0,
-      0
-    );
+    const desiredNaive = Date.UTC(args.year, args.month - 1, args.day, args.hour, args.minute, 0, 0);
+    const gotNaive = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, 0, 0);
 
     const diff = desiredNaive - gotNaive;
     if (diff === 0) break;
@@ -139,7 +130,7 @@ async function postWeeklyRecap(deps: {
   const channelId = recapCfg.channelId || "1457410392765759601";
   const topN = recapCfg.topN ?? 10;
 
-  // activity_daily is stored using UTC date keys
+  // activity stored using UTC date keys
   const endKey = toDateKeyUTC(new Date());
   const startKey = addDaysUtcDateKey(endKey, -6);
   const endExclusiveKey = addDaysUtcDateKey(endKey, 1);
@@ -150,19 +141,29 @@ async function postWeeklyRecap(deps: {
     return;
   }
 
-  const topChat = statements.activity.topMessagesBetween(
+  // ✅ scoped weekly leaderboards
+  const topChat = statements.activity.topMessagesScopedBetween(
+    MESSAGE_CATEGORY_IDS,
     startKey,
     endExclusiveKey,
     topN
   );
 
-  const topVoice = statements.activity.topVoiceBetween(
+  const topVoice = statements.activity.topVoiceScopedBetween(
+    VOICE_CATEGORY_IDS,
     startKey,
     endExclusiveKey,
     topN
   );
 
-  const totals = statements.activity.totalsBetween(
+  // ✅ totals (scoped)
+  const chatTotals = statements.activity.totalsScopedBetween(
+    MESSAGE_CATEGORY_IDS,
+    startKey,
+    endExclusiveKey
+  );
+  const voiceTotals = statements.activity.totalsScopedBetween(
+    VOICE_CATEGORY_IDS,
     startKey,
     endExclusiveKey
   );
@@ -208,7 +209,7 @@ async function postWeeklyRecap(deps: {
               }
             }
           } catch {
-            // ignore parse errors
+            // ignore
           }
 
           if (text.length > 80) text = text.slice(0, 77) + "...";
@@ -220,10 +221,10 @@ async function postWeeklyRecap(deps: {
 
   lines.push(`**Week:** \`${startKey}\` → \`${endKey}\``);
   lines.push("");
-  lines.push(`**💬 Top Chatters** (total: ${totals.messages} msgs)`);
+  lines.push(`**💬 Scoped Chat** (total: ${chatTotals.messages} msgs)`);
   lines.push(...chatLines);
   lines.push("");
-  lines.push(`**🎙️ Top Voice** (total: ${formatMinutes(totals.voice)})`);
+  lines.push(`**🎙️ Scoped Voice** (total: ${formatMinutes(voiceTotals.voice)})`);
   lines.push(...voiceLines);
 
   if (recapCfg.includeMoments) {
@@ -234,7 +235,7 @@ async function postWeeklyRecap(deps: {
   }
 
   const embed = buildSimpleEmbed({
-    title: "🌙 Weekly Memory Capsule",
+    title: "🌙 Weekly Memory Capsule (Scoped)",
     description: lines.join("\n")
   });
 

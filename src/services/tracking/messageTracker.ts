@@ -14,6 +14,12 @@ export type MessageTracker = {
   onMessage: (message: Message) => Promise<void>;
 };
 
+// ✅ hardcoded scoped categories (no config changes)
+const SCOPED_MESSAGE_CATEGORY_IDS = new Set<string>([
+  "1457409752735682702", // Main Chat
+  "1457409790388076871"  // Hobbies
+]);
+
 export function createMessageTracker(deps: {
   logger: Logger;
   statements: Statements;
@@ -77,16 +83,23 @@ export function createMessageTracker(deps: {
   async function shouldCountMessageForUser(full: any, userId: string): Promise<boolean> {
     if (!config.settings.personalChannels.excludeCreatorActivity) return true;
 
-    // owner-by-db (created by user)
     const creatorId = await maybeResolveChannelCreatorId(full, full.channelId);
     if (creatorId && creatorId === userId) return false;
 
-    // fallback heuristic
     if (config.settings.personalChannels.useManageOverwriteHeuristic) {
       if (hasExplicitOwnerOverwrite(full.channel, userId)) return false;
     }
 
     return true;
+  }
+
+  function resolveCategoryId(full: any): string | undefined {
+    try {
+      const parentId = (full.channel as any)?.parentId;
+      return typeof parentId === "string" && parentId.length ? parentId : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   async function onMessage(message: Message): Promise<void> {
@@ -135,7 +148,15 @@ export function createMessageTracker(deps: {
         const dateKey = toDateKeyUTC(full.createdAt);
         const bucket = bucketFromDateUTC(full.createdAt);
         const weekendDelta = isWeekendUTC(full.createdAt) ? 1 : 0;
+
+        // ✅ existing global count (unchanged)
         statements.activity.addMessage(userId, dateKey, bucket, weekendDelta);
+
+        // ✅ NEW: scoped count (only if channel is inside allowed categories)
+        const categoryId = resolveCategoryId(full as any);
+        if (categoryId && SCOPED_MESSAGE_CATEGORY_IDS.has(categoryId)) {
+          statements.activity.addMessageScoped(userId, dateKey, categoryId, bucket, weekendDelta);
+        }
       }
     }
 
