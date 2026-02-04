@@ -30,6 +30,11 @@ function tierForScore(score: number): string {
   return "🌱 New";
 }
 
+function safeNumber(v: unknown): number {
+  const n = typeof v === "number" ? v : Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
 export const aboutCommand: Command = {
   data: new SlashCommandBuilder()
     .setName("about")
@@ -45,6 +50,7 @@ export const aboutCommand: Command = {
       return;
     }
 
+    // Ensure user exists
     const member = await guild.members.fetch({ user: target.id, force: false }).catch(() => null);
     const joinIso = member?.joinedAt ? member.joinedAt.toISOString() : null;
     statements.users.upsertUser(target.id, joinIso);
@@ -64,6 +70,7 @@ export const aboutCommand: Command = {
       );
     }
 
+    // First memory + vibe
     const firstMoment = momentsService.getEarliestMoment(target.id);
     const firstMemoryText = firstMoment ? formatMomentShort(firstMoment) : "—";
     const vibeText = formatVibeDisplay(userRow, config);
@@ -72,46 +79,84 @@ export const aboutCommand: Command = {
     const scopedChat = statements.activity.getTotalsScoped(target.id, MESSAGE_CATEGORY_IDS);
     const scopedVoice = statements.activity.getTotalsScoped(target.id, VOICE_CATEGORY_IDS);
 
-    const scopedMessages = scopedChat.messages;
-    const scopedVoiceMin = scopedVoice.voice;
+    const scopedMessages = safeNumber(scopedChat.messages);
+    const scopedVoiceMin = safeNumber(scopedVoice.voice);
 
-    // ✅ top connections (3)
-    const top3 = statements.interactions.topMostSeenWith(target.id, 3);
+    // ✅ connections (use existing method only)
+    const topConnections = statements.interactions.topMostSeenWith(
+      target.id,
+      Math.max(3, config.settings.maxMostSeenWith ?? 10)
+    );
+
+    const top3 = topConnections.slice(0, 3);
+    const linksCount = topConnections.length;
+
     const topConnectionsText = top3.length
       ? top3
           .map((r, i) => {
             const medal = i === 0 ? "🥇" : i === 1 ? "🥈" : "🥉";
-            return `${medal} <@${r.other_user_id}> (**${r.score}**)`;
+            const score = safeNumber(r.score);
+            return `${medal} <@${r.other_user_id}>  •  **${score}**`;
           })
           .join("\n")
       : "—";
 
-    // ✅ links summary + interaction score
-    const interSummary = statements.interactions.getSummary(target.id);
-    const interactionScore = interSummary.score;
+    const interactionScore = topConnections.reduce((sum, r) => sum + safeNumber(r.score), 0);
 
-    // ✅ score formula
-    const score = scopedMessages + scopedVoiceMin * 0.5 + interactionScore;
+    // ✅ Activity score (no formula shown)
+    const score = Math.floor(scopedMessages + scopedVoiceMin * 0.5 + interactionScore);
     const tier = tierForScore(score);
+
+    // last seen snapshot (stored)
+    const lastSeenType = userRow?.last_seen_type ?? null;
+    const lastSeenAt = userRow?.last_seen_at ? new Date(userRow.last_seen_at) : null;
+
+    const lastSeenLine = lastSeenAt
+      ? `• **Last seen:** ${lastSeenType ?? "—"} — <t:${Math.floor(lastSeenAt.getTime() / 1000)}:R>`
+      : `• **Last seen:** —`;
+
+    const lastMsgLine =
+      userRow?.last_message_at && userRow?.last_message_channel_id
+        ? `• **Last message:** <#${userRow.last_message_channel_id}> — <t:${Math.floor(new Date(userRow.last_message_at).getTime() / 1000)}:R>`
+        : `• **Last message:** —`;
+
+    const lastVcLine =
+      userRow?.last_vc_at && userRow?.last_vc_channel_id
+        ? `• **Last VC:** <#${userRow.last_vc_channel_id}> — ${formatMinutes(safeNumber(userRow.last_vc_minutes))} — <t:${Math.floor(new Date(userRow.last_vc_at).getTime() / 1000)}:R>`
+        : `• **Last VC:** —`;
 
     const embed = new EmbedBuilder()
       .setTitle("🌙 Bound By Will Profile")
       .setColor(0x8f7b66)
-      .setDescription(`**${target.username}** • ${tier}`)
-      .addFields(
-        { name: "Crew", value: crew || "—", inline: true },
-        { name: "Vibe", value: vibeText || "—", inline: true },
-        { name: "First memory", value: firstMemoryText || "—", inline: false },
-
-        { name: "💬 Scoped Messages", value: `**${scopedMessages}**`, inline: true },
-        { name: "🎙️ Scoped VC Minutes", value: `**${formatMinutes(scopedVoiceMin)}**`, inline: true },
-        { name: "🔗 Links", value: `**${interSummary.links}**`, inline: true },
-
-        { name: "⭐ Activity Score", value: `**${Math.floor(score)}**  *(msgs + vc×0.5 + links)*`, inline: false },
-
-        { name: "Top Connections", value: topConnectionsText, inline: false }
+      .setAuthor({
+        name: `${target.username} • ${tier}`,
+        iconURL: target.displayAvatarURL({ size: 128 })
+      })
+      .setThumbnail(target.displayAvatarURL({ size: 256 }))
+      .setDescription(
+        [
+          `**⭐ Activity Score:** **${score}**`,
+          "",
+          `**Identity**`,
+          `• **Crew:** ${crew || "—"}`,
+          `• **Vibe:** ${vibeText || "—"}`,
+          "",
+          `**Stored Activity (scoped)**`,
+          `• 💬 **Messages:** **${scopedMessages}**`,
+          `• 🎙️ **VC:** **${formatMinutes(scopedVoiceMin)}**`,
+          `• 🔗 **Links:** **${linksCount}**`,
+          "",
+          `**Timeline**`,
+          lastSeenLine,
+          lastMsgLine,
+          lastVcLine
+        ].join("\n")
       )
-      .setFooter({ text: "LunaLog • Scoped activity only" });
+      .addFields(
+        { name: "🧠 First Memory", value: firstMemoryText || "—", inline: false },
+        { name: "🤝 Top Connections", value: topConnectionsText, inline: false }
+      )
+      .setFooter({ text: "LunaLog • Scoped activity tracking" });
 
     await interaction.editReply({ embeds: [embed] });
   }
