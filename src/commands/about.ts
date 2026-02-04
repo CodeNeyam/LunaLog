@@ -24,9 +24,9 @@ function formatMinutes(min: number): string {
 }
 
 function tierForScore(score: number): string {
-  if (score >= 700) return "👑 Legend";
-  if (score >= 300) return "🔥 Grinder";
-  if (score >= 100) return "✨ Active";
+  if (score >= 10000) return "👑 Legend";
+  if (score >= 5000) return "🔥 Grinder";
+  if (score >= 1000) return "✨ Active";
   return "🌱 New";
 }
 
